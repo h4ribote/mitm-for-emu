@@ -1,0 +1,2 @@
+# mitmproxy for android emulator
+Dockerでのmitmproxy稼働、証明書発行を行うスクリプトと、Androidでシステムレベルの証明書として登録する方法の手順書。
