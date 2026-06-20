@@ -1,0 +1,6 @@
+local/
+*.log
+.env
+
+# Generated mitmproxy CA material (contains the CA PRIVATE KEY) - never commit
+certs/
