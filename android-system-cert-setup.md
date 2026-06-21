@@ -332,3 +332,76 @@ docker exec mitmproxy-emu sh -c "cp /home/mitmproxy/.mitmproxy/mitmproxy-ca-cert
 - ホストの `10.0.2.2:8080` や NAT ゲートウェイ経由は Docker Desktop の
   ネットワーク構成では届かないことがあります（本環境では `HTTP=000`）。
   確実なのは `adb reverse` 方式です。
+
+---
+
+## 付録: ブラウザ以外／プロキシ非対応アプリの透過傍受（redsocks2 + iptables・検証済み）
+
+グローバルプロキシ（`settings put global http_proxy`）は、Android 標準の HTTP
+スタック（HttpURLConnection / OkHttp / Cronet 等）を使うアプリには効きますが、
+プロキシ設定を無視するアプリには効きません。root があるので、**iptables で
+全 TCP の 80/443 を redsocks へリダイレクト**し、redsocks が宛先を CONNECT に
+変換して上流の mitmproxy（`127.0.0.1:8080`＝`adb reverse` 経由）へ転送します。
+
+### 重要な前提（ハマりどころ）
+
+- **mitmproxy は `--set connection_strategy=lazy` が必須。**
+  redsocks は元宛先（`SO_ORIGINAL_DST`）しか分からないため、CONNECT 先が
+  **IP アドレス**になります。既定の `eager` だと mitmproxy はクライアントの
+  SNI を見る前に上流へ接続し、SNI 無しで CDN（Cloudflare/Google 等）への TLS が
+  失敗します。`lazy` にすると ClientHello（SNI）取得後に上流接続するので解決します。
+  `start-mitmproxy.sh` / `.bat` は自動でこのオプションを付与します。
+- **redsocks は darkk 版ではなく `semigodking/redsocks`（redsocks2）を使用。**
+  darkk 版は本環境で CONNECT 確立後にクライアントデータを中継せず停止しました。
+  redsocks2 で解決しています。
+
+### 1. redsocks2 を x86_64 静的バイナリでビルド（Docker）
+
+```powershell
+docker run --rm -v "<repo>\local\redsocks:/out" amd64/alpine:3.19 sh /out/build2.sh
+```
+
+`build2.sh` は Alpine(musl) で `semigodking/redsocks` を `-static` でビルドし、
+`local\redsocks\redsocks2` を出力します（Android-x86 はカーネルが Linux のため
+完全静的バイナリがそのまま動きます）。
+
+### 2. デバイスへ展開して有効化
+
+```powershell
+powershell -ExecutionPolicy Bypass -File local\redsocks\setup-redsocks.ps1
+```
+
+このスクリプトは: `adb root` → `adb reverse tcp:8080 tcp:8080` →
+`redsocks2` と設定/スクリプトを `/data/local/tmp` へ push →
+端末上で `redsocks-up.sh` を実行（redsocks2 起動 + iptables 設定 +
+グローバルプロキシ解除）します。
+
+redsocks2 設定（`redsocks2.conf`）の要点:
+
+```
+redsocks {
+    bind  = "127.0.0.1:12345";
+    relay = "127.0.0.1:8080";   /* 上流 = mitmproxy (adb reverse) */
+    type  = http-connect;
+}
+```
+
+### 3. 動作確認（プロキシ未設定でも傍受される＝透過）
+
+```powershell
+& $adb -s $dev shell "curl -m 10 -o /dev/null -w 'HTTP=%{http_code} verify=%{ssl_verify_result}\n' https://www.google.com/generate_204"
+# => HTTP=204 verify=0   （-x を付けない＝本来プロキシを通らない通信が傍受されている）
+```
+
+### 4. 解除 / 注意点
+
+```powershell
+& $adb -s $dev shell "sh /data/local/tmp/redsocks-down.sh"   # iptables 削除 + redsocks2 停止
+```
+
+- redsocks2・iptables・`adb reverse` は**端末再起動／adb 切断で消えます**。
+  再起動後は `setup-redsocks.ps1` を再実行してください。
+- リダイレクトは 80/443 のみ。非 HTTP プロトコルや QUIC(UDP 443) は対象外です
+  （QUIC を TCP へフォールバックさせたい場合は UDP 443 を iptables で DROP）。
+- 証明書ピンニングを行うアプリは、システム CA を入れても拒否されます。
+  Frida/objection 等でのバイパスが別途必要です。

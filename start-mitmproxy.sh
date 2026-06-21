@@ -21,6 +21,7 @@
 # Configuration is read from ./.env (copy .env.example to .env). Supported keys:
 #   MITM_PROXY_USER  proxy auth username        (default mitmproxy)
 #   MITM_PROXY_PASS  proxy auth password        (empty = no authentication)
+#   MITMWEB_PASSWORD mitmweb Web UI password    (empty = random token; web mode)
 #   PROXY_PORT       proxy listen port          (default 8080)
 #   WEB_PORT         Web UI port                (default 8081)
 #   CERT_DIR         certificate output dir     (default ./certs)
@@ -61,6 +62,7 @@ CERT_DIR="${CERT_DIR:-${SCRIPT_DIR}/certs}"
 IMAGE="${IMAGE:-mitmproxy/mitmproxy}"
 MITM_PROXY_USER="${MITM_PROXY_USER:-mitmproxy}"
 MITM_PROXY_PASS="${MITM_PROXY_PASS:-}"
+MITMWEB_PASSWORD="${MITMWEB_PASSWORD:-}"
 CONTAINER_NAME="mitmproxy-emu"
 
 # --- prerequisite checks -----------------------------------------------
@@ -85,9 +87,16 @@ if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
 fi
 
 # --- decide launch command ---------------------------------------------
+WEB_AUTH_STATUS="n/a"
 case "${MODE}" in
   web)
     APP_CMD=(mitmweb --web-host 0.0.0.0 --web-port "${WEB_PORT}" --listen-port "${PROXY_PORT}")
+    if [ -n "${MITMWEB_PASSWORD}" ]; then
+      APP_CMD+=(--set "web_password=${MITMWEB_PASSWORD}")
+      WEB_AUTH_STATUS="enabled (password from .env)"
+    else
+      WEB_AUTH_STATUS="disabled (random token printed in logs)"
+    fi
     INTERACTIVE="-d"   # Web UI: run detached in the background
     ;;
   proxy)
@@ -104,6 +113,11 @@ case "${MODE}" in
     ;;
 esac
 
+# connection_strategy=lazy: wait for the client TLS ClientHello (SNI) before
+# connecting upstream. Required for transparent/redsocks setups where the
+# CONNECT target is a raw IP (the real hostname is only in the SNI).
+APP_CMD+=(--set "connection_strategy=lazy")
+
 # Enable proxy authentication when a password is configured.
 AUTH_STATUS="disabled"
 if [ -n "${MITM_PROXY_PASS}" ]; then
@@ -117,6 +131,7 @@ echo " Starting mitmproxy"
 echo "   mode        : ${MODE}"
 echo "   proxy port  : ${PROXY_PORT}"
 [ "${MODE}" = "web" ] && echo "   Web UI      : http://127.0.0.1:${WEB_PORT}"
+[ "${MODE}" = "web" ] && echo "   Web UI auth : ${WEB_AUTH_STATUS}"
 echo "   proxy auth  : ${AUTH_STATUS}"
 echo "   cert dir    : ${CERT_DIR}"
 echo "   docker image: ${IMAGE}"
@@ -139,4 +154,7 @@ if [ "${MODE}" = "web" ]; then
   echo "  logs   : docker logs -f ${CONTAINER_NAME}"
   echo "  stop   : docker stop ${CONTAINER_NAME}"
   echo "  Web UI : http://127.0.0.1:${WEB_PORT}"
+  if [ -n "${MITMWEB_PASSWORD}" ]; then
+    echo "  (Web UI is password-protected; enter the password or use ?token=<password>)"
+  fi
 fi
